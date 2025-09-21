@@ -1,0 +1,44 @@
+FROM golang:1.21-alpine as builder
+
+# install tzdata ca-certificates to be copied on scratch image.
+RUN apk --no-cache add \
+	tzdata \
+	git \
+	ca-certificates
+
+WORKDIR /src
+COPY go.mod go.sum ./
+
+# configure private access to tempmee repositories.
+ENV GOPRIVATE "github.com/TempMee"
+ARG GITHUB_TOKEN
+RUN apk add --no-cache openssh
+RUN git config --global url."git@github.com:".insteadOf "https://github.com/"
+RUN mkdir /root/.ssh/
+ADD id_rsa /root/.ssh/id_rsa
+
+RUN touch /root/.ssh/known_hosts
+RUN ssh-keyscan github.com >> /root/.ssh/known_hosts
+
+RUN echo $GITHUB_TOKEN
+# download server dependencies
+RUN go mod download
+COPY examples/server_and_client_redis/go.mod examples/server_and_client_redis/go.sum ./examples/server_and_client_redis/
+RUN cd examples/server_and_client_redis && go mod download
+ARG VERSION="latest"
+
+# build the server
+COPY . .
+RUN cd examples/server_and_client_redis && go mod download && go build -ldflags="-w -s -X 'main.version=${VERSION}'" -o /src/dist/server server.go
+
+FROM scratch
+
+# we need tzdata to load time location in Go program
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+# we need public certs to make external TLS connection.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# copy the binary that already built and all required files
+COPY --from=builder /src/dist /
+
+ENTRYPOINT ["/server"]
